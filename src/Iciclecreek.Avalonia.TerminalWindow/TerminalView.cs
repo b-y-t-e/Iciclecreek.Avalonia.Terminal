@@ -16,6 +16,7 @@ using System.Globalization;
 using System.Linq;
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using XTerm.Buffer;
@@ -34,6 +35,11 @@ namespace Iciclecreek.Terminal
         private double _charHeight;
         private int _bufferSize = 1000;
         private bool _isAlternateBuffer;
+
+        // URL hover state
+        private static readonly Regex UrlRegex = new(@"https?://[^\s<>""'`\]\)\},;]+", RegexOptions.Compiled);
+        private (string Url, int BufferLine, int StartCol, int EndCol)? _hoveredLink;
+        private Cursor? _savedCursor;
 
         // Process management
         private IPtyConnection? _ptyConnection;
@@ -54,6 +60,14 @@ namespace Iciclecreek.Terminal
 
         // IME (Input Method Editor) support
         private TerminalInputMethodClient? _inputMethodClient;
+
+        // When true, auto-scroll is suppressed because the user scrolled up manually.
+        // Reset when the user scrolls back to bottom or when user input is sent to PTY.
+        private volatile bool _userScrolledUp;
+        private volatile bool _autoScrollToBottom = true;
+
+        // Fires ShellReady exactly once after the first PTY output chunk.
+        private int _shellReadyFired; // 0=not yet, 1=fired
 
         // Unique identifier for this terminal instance (for debugging)
         private readonly Guid _instanceId = Guid.NewGuid();
@@ -170,6 +184,12 @@ namespace Iciclecreek.Terminal
             AvaloniaProperty.Register<TerminalView, int>(
                 nameof(CursorBlinkRate),
                 defaultValue: 530);
+
+        public bool AutoScrollToBottom
+        {
+            get => _autoScrollToBottom;
+            set => _autoScrollToBottom = value;
+        }
 
         /// <summary>
         /// When <see langword="false"/> (default), a plain single left-click does not
@@ -321,9 +341,25 @@ namespace Iciclecreek.Terminal
         #endregion
 
         /// <summary>
+        /// Event raised once when the shell produces its first output (e.g. the prompt),
+        /// indicating it is ready to accept input.
+        /// </summary>
+        public event EventHandler? ShellReady;
+
+        /// <summary>
         /// Event raised when the PTY process exits.
         /// </summary>
         public event EventHandler<ProcessExitedEventArgs>? ProcessExited;
+
+        /// <summary>
+        /// Event raised when a URL in the terminal is Ctrl+Clicked.
+        /// </summary>
+        public event EventHandler<UrlClickedEventArgs>? UrlClicked;
+
+        /// <summary>
+        /// Event raised when the terminal receives output from the PTY process.
+        /// </summary>
+        public event EventHandler<string>? OutputReceived;
 
         /// <summary>
         /// Event raised when the terminal title changes.
@@ -509,6 +545,9 @@ namespace Iciclecreek.Terminal
 
                 if (oldValue != _terminal.Buffer.ViewportY)
                 {
+                    if (AutoScrollToBottom)
+                        _userScrolledUp = _terminal.Buffer.ViewportY < MaxScrollback;
+
                     RaisePropertyChanged(ViewportYProperty, oldValue, _terminal.Buffer.ViewportY);
                     this.RequestInvalidate();
                 }
@@ -535,9 +574,9 @@ namespace Iciclecreek.Terminal
 
         public XTerm.Terminal Terminal => _terminal;
 
-        public void WaitForExit(int ms) => _ptyConnection!.WaitForExit(ms);
+        public void WaitForExit(int ms) => _ptyConnection?.WaitForExit(ms);
 
-        public void Kill() => _ptyConnection!.Kill();
+        public void Kill() => _ptyConnection?.Kill();
 
         /// <summary>
         /// Pastes text from the clipboard into the terminal.
@@ -597,7 +636,7 @@ namespace Iciclecreek.Terminal
         /// <summary>
         /// Gets the exit code of the launched PTY process after it has terminated.
         /// </summary>
-        public int ExitCode => _ptyConnection!.ExitCode;
+        public int ExitCode => _ptyConnection?.ExitCode ?? -1;
 
         /// <summary>
         /// Gets the operating system process identifier of the launched PTY process.
@@ -1158,6 +1197,18 @@ namespace Iciclecreek.Terminal
                 var col = (int)(point.X / _charWidth);
                 var row = (int)(point.Y / _charHeight);
 
+                // Ctrl+Click on a hovered URL
+                if (_hoveredLink.HasValue && e.KeyModifiers.HasFlag(KeyModifiers.Control))
+                {
+                    var leftBtn = e.GetCurrentPoint(this).Properties.IsLeftButtonPressed;
+                    if (leftBtn)
+                    {
+                        UrlClicked?.Invoke(this, new UrlClickedEventArgs(_hoveredLink.Value.Url));
+                        e.Handled = true;
+                        return;
+                    }
+                }
+
                 // Check if we should handle selection (app doesn't want mouse, or Shift override)
                 if (ShouldHandleSelection(e.KeyModifiers))
                 {
@@ -1308,6 +1359,10 @@ namespace Iciclecreek.Terminal
                     return;
                 }
 
+                // URL hover detection
+                int bufferLine = _terminal.Buffer.ViewportY + row;
+                UpdateHoveredUrl(bufferLine, col);
+
                 // Forward mouse event to application
                 if (_ptyConnection == null)
                     return;
@@ -1329,6 +1384,12 @@ namespace Iciclecreek.Terminal
             {
                 Debug.WriteLine($"Error handling mouse move: {ex.Message}");
             }
+        }
+
+        protected override void OnPointerExited(PointerEventArgs e)
+        {
+            base.OnPointerExited(e);
+            ClearHoveredUrl();
         }
 
         protected override async void OnPointerWheelChanged(PointerWheelEventArgs e)
@@ -1633,6 +1694,25 @@ namespace Iciclecreek.Terminal
             if (ptyConnection == null || string.IsNullOrEmpty(data))
                 return;
 
+            // User typed something — resume auto-scroll
+            if (_userScrolledUp && AutoScrollToBottom)
+            {
+                _userScrolledUp = false;
+                lock (_terminalLock)
+                {
+                    var oldY = _terminal.Buffer.ViewportY;
+                    _terminal.Buffer.ScrollToBottom();
+                    var newY = _terminal.Buffer.ViewportY;
+                    if (oldY != newY)
+                    {
+                        Dispatcher.UIThread.Post(() =>
+                        {
+                            RaisePropertyChanged(ViewportYProperty, oldY, newY);
+                        });
+                    }
+                }
+            }
+
             await _semaphore.WaitAsync(ct).ConfigureAwait(false);
             try
             {
@@ -1732,6 +1812,77 @@ namespace Iciclecreek.Terminal
 
             // Handle selection if app doesn't want mouse, OR if Shift override is active
             return !appWantsMouse || shiftHeld;
+        }
+
+        private string GetLineText(BufferLine line, int cols)
+        {
+            var sb = new StringBuilder(cols);
+            for (int x = 0; x < cols && x < line.Length; x++)
+            {
+                var cell = line[x];
+                if (cell.Width == 0) continue;
+                sb.Append(cell.Content ?? " ");
+            }
+            return sb.ToString();
+        }
+
+        private (string Url, int StartCol, int EndCol)? FindUrlAtColumn(int bufferLine, int col)
+        {
+            if (bufferLine < 0 || bufferLine >= _terminal.Buffer.Length)
+                return null;
+
+            var line = _terminal.Buffer.GetLine(bufferLine);
+            if (line == null) return null;
+
+            var text = GetLineText(line, _terminal.Cols);
+            foreach (Match m in UrlRegex.Matches(text))
+            {
+                if (col >= m.Index && col < m.Index + m.Length)
+                    return (m.Value, m.Index, m.Index + m.Length - 1);
+            }
+            return null;
+        }
+
+        private void UpdateHoveredUrl(int bufferLine, int col)
+        {
+            var found = FindUrlAtColumn(bufferLine, col);
+
+            if (found.HasValue)
+            {
+                var newHover = (found.Value.Url, bufferLine, found.Value.StartCol, found.Value.EndCol);
+                if (_hoveredLink.HasValue && _hoveredLink.Value == newHover)
+                    return;
+
+                ClearHoveredUrl();
+                _hoveredLink = newHover;
+                _savedCursor = Cursor;
+                Cursor = new Cursor(StandardCursorType.Hand);
+                InvalidateUrlLine(bufferLine);
+            }
+            else
+            {
+                ClearHoveredUrl();
+            }
+        }
+
+        private void ClearHoveredUrl()
+        {
+            if (!_hoveredLink.HasValue) return;
+            var oldLine = _hoveredLink.Value.BufferLine;
+            _hoveredLink = null;
+            if (_savedCursor != null)
+            {
+                Cursor = _savedCursor;
+                _savedCursor = null;
+            }
+            InvalidateUrlLine(oldLine);
+        }
+
+        private void InvalidateUrlLine(int bufferLine)
+        {
+            var line = _terminal.Buffer.GetLine(bufferLine);
+            if (line != null) line.Cache = null;
+            this.RequestInvalidate();
         }
 
         private bool TryGetPrintableChar(KeyEventArgs e, out char character)
@@ -1839,6 +1990,7 @@ namespace Iciclecreek.Terminal
             {
                 _processCts = new CancellationTokenSource();
                 Interlocked.Exchange(ref _processExitHandled, 0);  // Reset flag for new process
+                Interlocked.Exchange(ref _shellReadyFired, 0);
 
                 // Determine the process to launch based on OS if not explicitly set
                 string processToLaunch = Process;
@@ -1916,6 +2068,7 @@ namespace Iciclecreek.Terminal
                             lock (_terminalLock)
                             {
                                 _terminal.WriteLine($"\nProcess exited with code: {exitCode}\n");
+                                _userScrolledUp = false;
                                 _terminal.Buffer.ScrollToBottom();
                             }
 
@@ -1926,23 +2079,30 @@ namespace Iciclecreek.Terminal
 
                     var output = Encoding.UTF8.GetString(buffer, 0, bytesRead);
 
-                    // Snapshot before write so we can detect buffer growth (MaxScrollback
-                    // increases when _terminal.Write adds lines; ScrollToBottom only moves
-                    // ViewportY and does not affect buffer length).
+                    Dispatcher.UIThread.Post(() => OutputReceived?.Invoke(this, output));
+
                     var oldMax = MaxScrollback;
                     var oldY = _terminal.Buffer.ViewportY;
 
                     lock (_terminalLock)
                     {
+                        var preWriteY = _terminal.Buffer.ViewportY;
                         _terminal.Write(output);
+
+                        if (!_isAlternateBuffer && AutoScrollToBottom)
+                        {
+                            if (_userScrolledUp)
+                                _terminal.Buffer.ViewportY = preWriteY;
+                            else
+                                _terminal.Buffer.ScrollToBottom();
+                        }
                     }
 
-                    // Auto-scroll to bottom when new content arrives, but only in normal buffer.
-                    // Alternate buffer (used by full-screen apps like vim, htop, asciiquarium)
-                    // handles its own cursor positioning and shouldn't be scrolled.
+                    if (Interlocked.Exchange(ref _shellReadyFired, 1) == 0)
+                        Dispatcher.UIThread.Post(() => ShellReady?.Invoke(this, EventArgs.Empty));
+
                     if (!_isAlternateBuffer)
                     {
-                        _terminal.Buffer.ScrollToBottom();
                         var newY = _terminal.Buffer.ViewportY;
                         var newMax = MaxScrollback;
 
@@ -1977,6 +2137,7 @@ namespace Iciclecreek.Terminal
                 lock (_terminalLock)
                 {
                     _terminal.WriteLine($"\nError reading from process: {ex.Message}\n");
+                    _userScrolledUp = false;
                     _terminal.Buffer.ScrollToBottom();
                 }
 
@@ -1993,6 +2154,7 @@ namespace Iciclecreek.Terminal
             lock (_terminalLock)
             {
                 _terminal.WriteLine($"\nProcess exited with code: {e.ExitCode}\n");
+                _userScrolledUp = false;
                 _terminal.Buffer.ScrollToBottom();
             }
             this.RequestInvalidate();
@@ -2070,7 +2232,13 @@ namespace Iciclecreek.Terminal
                     // Also resize the PTY connection if it exists
                     _ptyConnection?.Resize(newCols, newRows);
 
+                    var max = MaxScrollback;
+                    if (_terminal.Buffer.ViewportY > max)
+                        _terminal.Buffer.ViewportY = max;
+
                     RaisePropertyChanged(ViewportLinesProperty, default(int), ViewportLines);
+                    RaisePropertyChanged(MaxScrollbackProperty, default(int), max);
+                    RaisePropertyChanged(ViewportYProperty, default(int), _terminal.Buffer.ViewportY);
                 }
             }
 
@@ -2118,6 +2286,9 @@ namespace Iciclecreek.Terminal
                         RenderNormalLine(context, line, screenY, startYPos, rowHeight, scale);
                     }
                 }
+
+                // Render URL underline when hovering
+                RenderHoveredUrl(context, viewportY, scale);
 
                 // Render selection overlay
                 RenderSelection(context, viewportY, scale);
@@ -2235,6 +2406,22 @@ namespace Iciclecreek.Terminal
             // Cache the text runs (but not when ReverseVideo mode is active)
             if (!_terminal.ReverseVideo)
                 line.Cache = textRuns;
+        }
+
+        private void RenderHoveredUrl(DrawingContext context, int viewportY, double scale)
+        {
+            if (!_hoveredLink.HasValue) return;
+
+            var link = _hoveredLink.Value;
+            int screenRow = link.BufferLine - viewportY;
+            if (screenRow < 0 || screenRow >= _terminal.Rows) return;
+
+            var startX = Snap(link.StartCol * _charWidth, scale);
+            var endX = Snap((link.EndCol + 1) * _charWidth, scale);
+            var y = Snap((screenRow + 1) * _charHeight - 1, scale);
+
+            var pen = new Pen(Foreground, 1);
+            context.DrawLine(pen, new Point(startX, y), new Point(endX, y));
         }
 
         /// <summary>

@@ -59,7 +59,13 @@ namespace Iciclecreek.Terminal
                 nameof(Options),
                 defaultValue: null);
 
+        /// <inheritdoc cref="TerminalView.ShellReady"/>
+        public event EventHandler? ShellReady;
         public event EventHandler<ProcessExitedEventArgs>? ProcessExited;
+        /// <inheritdoc cref="TerminalView.UrlClicked"/>
+        public event EventHandler<UrlClickedEventArgs>? UrlClicked;
+        /// <inheritdoc cref="TerminalView.OutputReceived"/>
+        public event EventHandler<string>? OutputReceived;
 
         /// <summary>
         /// Gets or sets the brush used to render selected terminal text.
@@ -187,6 +193,12 @@ namespace Iciclecreek.Terminal
         /// </summary>
         public void EndReparent() => _terminalView?.EndReparent();
 
+        public bool AutoScrollToBottom
+        {
+            get => _terminalView?.AutoScrollToBottom ?? true;
+            set { if (_terminalView != null) _terminalView.AutoScrollToBottom = value; }
+        }
+
         /// <inheritdoc cref="TerminalView.ShowCaretOnClickProperty"/>
         public bool ShowCaretOnClick
         {
@@ -282,6 +294,9 @@ namespace Iciclecreek.Terminal
             {
                 _terminalView.PropertyChanged -= OnTerminalViewPropertyChanged;
                 _terminalView.ProcessExited -= OnTerminalViewProcessExited;
+                _terminalView.ShellReady -= OnTerminalViewShellReady;
+                _terminalView.UrlClicked -= OnTerminalViewUrlClicked;
+                _terminalView.OutputReceived -= OnTerminalViewOutputReceived;
             }
 
             SetCurrentDirectory(null);
@@ -297,6 +312,9 @@ namespace Iciclecreek.Terminal
                 _terminalView.Options = Options ?? new XTerm.Options.TerminalOptions();
                 _terminalView.PropertyChanged += OnTerminalViewPropertyChanged;
                 _terminalView.ProcessExited += OnTerminalViewProcessExited;
+                _terminalView.ShellReady += OnTerminalViewShellReady;
+                _terminalView.UrlClicked += OnTerminalViewUrlClicked;
+                _terminalView.OutputReceived += OnTerminalViewOutputReceived;
                 SetCurrentDirectory(_terminalView.CurrentDirectory);
                 // (no window event hooking needed)
             }
@@ -330,6 +348,21 @@ namespace Iciclecreek.Terminal
             ProcessExited?.Invoke(this, e);
         }
 
+        private void OnTerminalViewShellReady(object? sender, EventArgs e)
+        {
+            ShellReady?.Invoke(this, EventArgs.Empty);
+        }
+
+        private void OnTerminalViewUrlClicked(object? sender, UrlClickedEventArgs e)
+        {
+            UrlClicked?.Invoke(this, e);
+        }
+
+        private void OnTerminalViewOutputReceived(object? sender, string e)
+        {
+            OutputReceived?.Invoke(this, e);
+        }
+
         private void SetCurrentDirectory(string? currentDirectory)
         {
             SetAndRaise(CurrentDirectoryProperty, ref _currentDirectory, currentDirectory);
@@ -343,7 +376,9 @@ namespace Iciclecreek.Terminal
             if (_terminalView.IsAlternateBuffer)
             {
                 _scrollBar.IsVisible = false;
+                _scrollBar.Scroll -= OnScrollBarScroll;
                 _scrollBar.Value = 0;
+                _scrollBar.Scroll += OnScrollBarScroll;
                 return;
             }
 
@@ -351,12 +386,13 @@ namespace Iciclecreek.Terminal
             var viewportLines = _terminalView.ViewportLines;
             var currentScroll = _terminalView.ViewportY;
 
-            // Scrollbar range: 0 (top of buffer) to maxScrollback (bottom/current output)
+            _scrollBar.Scroll -= OnScrollBarScroll;
             _scrollBar.Minimum = 0;
             _scrollBar.Maximum = maxScrollback;
             _scrollBar.ViewportSize = viewportLines;
             _scrollBar.Value = currentScroll;
             _scrollBar.IsVisible = maxScrollback > 0;
+            _scrollBar.Scroll += OnScrollBarScroll;
         }
     }
 }
