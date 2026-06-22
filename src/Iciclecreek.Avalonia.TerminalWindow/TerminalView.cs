@@ -34,6 +34,7 @@ namespace Iciclecreek.Terminal
         private double _charHeight;
         private int _bufferSize = 1000;
         private bool _isAlternateBuffer;
+        private volatile bool _userScrolledUp;
 
         // Process management
         private IPtyConnection? _ptyConnection;
@@ -326,6 +327,11 @@ namespace Iciclecreek.Terminal
         public event EventHandler<ProcessExitedEventArgs>? ProcessExited;
 
         /// <summary>
+        /// Event raised when the terminal receives output from the PTY process.
+        /// </summary>
+        public event EventHandler<string>? OutputReceived;
+
+        /// <summary>
         /// Event raised when the terminal title changes.
         /// </summary>
         public event EventHandler<TitleChangedEventArgs>? TitleChanged;
@@ -509,6 +515,7 @@ namespace Iciclecreek.Terminal
 
                 if (oldValue != _terminal.Buffer.ViewportY)
                 {
+                    _userScrolledUp = _terminal.Buffer.ViewportY < MaxScrollback;
                     RaisePropertyChanged(ViewportYProperty, oldValue, _terminal.Buffer.ViewportY);
                     this.RequestInvalidate();
                 }
@@ -1925,6 +1932,8 @@ namespace Iciclecreek.Terminal
                     }
 
                     var output = Encoding.UTF8.GetString(buffer, 0, bytesRead);
+
+                    Dispatcher.UIThread.Post(() => OutputReceived?.Invoke(this, output));
 
                     // Snapshot before write so we can detect buffer growth (MaxScrollback
                     // increases when _terminal.Write adds lines; ScrollToBottom only moves
