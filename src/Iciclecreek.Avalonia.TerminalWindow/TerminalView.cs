@@ -55,6 +55,10 @@ namespace Iciclecreek.Terminal
         // IME (Input Method Editor) support
         private TerminalInputMethodClient? _inputMethodClient;
 
+        // When true, auto-scroll is suppressed because the user scrolled up manually.
+        // Reset when the user scrolls back to bottom or when user input is sent to PTY.
+        private volatile bool _userScrolledUp;
+
         // Unique identifier for this terminal instance (for debugging)
         private readonly Guid _instanceId = Guid.NewGuid();
 
@@ -179,6 +183,23 @@ namespace Iciclecreek.Terminal
         /// single-cell highlight appears on every click.
         /// Double- and triple-click (word / line selection) are unaffected by this setting.
         /// </summary>
+
+        /// <summary>
+        /// When <see langword="true"/> (default), the terminal automatically scrolls to
+        /// the bottom when new output arrives. The user can still scroll up manually;
+        /// auto-scroll resumes when the user types or scrolls back to the bottom.
+        /// </summary>
+        public static readonly StyledProperty<bool> AutoScrollToBottomProperty =
+            AvaloniaProperty.Register<TerminalView, bool>(
+                nameof(AutoScrollToBottom),
+                defaultValue: true);
+
+        public bool AutoScrollToBottom
+        {
+            get => GetValue(AutoScrollToBottomProperty);
+            set => SetValue(AutoScrollToBottomProperty, value);
+        }
+
         public static readonly StyledProperty<bool> ShowCaretOnClickProperty =
             AvaloniaProperty.Register<TerminalView, bool>(
                 nameof(ShowCaretOnClick),
@@ -1377,6 +1398,11 @@ namespace Iciclecreek.Terminal
                     ViewportY = newViewportY;
                 }
 
+                if (AutoScrollToBottom)
+                {
+                    _userScrolledUp = newViewportY < MaxScrollback;
+                }
+
                 e.Handled = true;
             }
         }
@@ -1632,6 +1658,13 @@ namespace Iciclecreek.Terminal
             var ptyConnection = _ptyConnection;
             if (ptyConnection == null || string.IsNullOrEmpty(data))
                 return;
+
+            // User typed something — resume auto-scroll
+            if (_userScrolledUp && AutoScrollToBottom)
+            {
+                _userScrolledUp = false;
+                _terminal.Buffer.ScrollToBottom();
+            }
 
             await _semaphore.WaitAsync(ct).ConfigureAwait(false);
             try
@@ -1942,7 +1975,8 @@ namespace Iciclecreek.Terminal
                     // handles its own cursor positioning and shouldn't be scrolled.
                     if (!_isAlternateBuffer)
                     {
-                        _terminal.Buffer.ScrollToBottom();
+                        if (!_userScrolledUp)
+                            _terminal.Buffer.ScrollToBottom();
                         var newY = _terminal.Buffer.ViewportY;
                         var newMax = MaxScrollback;
 

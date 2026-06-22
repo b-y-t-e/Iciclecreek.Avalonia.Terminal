@@ -187,6 +187,13 @@ namespace Iciclecreek.Terminal
         /// </summary>
         public void EndReparent() => _terminalView?.EndReparent();
 
+        /// <inheritdoc cref="TerminalView.AutoScrollToBottomProperty"/>
+        public bool AutoScrollToBottom
+        {
+            get => _terminalView?.AutoScrollToBottom ?? true;
+            set { if (_terminalView != null) _terminalView.AutoScrollToBottom = value; }
+        }
+
         /// <inheritdoc cref="TerminalView.ShowCaretOnClickProperty"/>
         public bool ShowCaretOnClick
         {
