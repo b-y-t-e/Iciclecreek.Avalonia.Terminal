@@ -11,6 +11,9 @@
 *.sln.docstates
 *.env
 
+# NuGet artifacts
+artifacts/
+
 # User-specific files (MonoDevelop/Xamarin Studio)
 *.userprefs
 
