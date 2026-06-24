@@ -599,7 +599,7 @@ namespace Iciclecreek.Terminal
                     text = $"\u001b[200~{text}\u001b[201~";
                 }
 
-                await SendToPtyAsync(text);
+                await SendToPtyAsync(text, resumeAutoScroll: true);
             }
         }
 
@@ -1044,8 +1044,11 @@ namespace Iciclecreek.Terminal
                     if (!string.IsNullOrEmpty(sequence))
                     {
                         e.Handled = true;
-
-                        await SendToPtyAsync(sequence).ConfigureAwait(false);
+                        bool isModifierOnly = e.Key is Key.LeftCtrl or Key.RightCtrl
+                            or Key.LeftShift or Key.RightShift
+                            or Key.LeftAlt or Key.RightAlt
+                            or Key.LWin or Key.RWin;
+                        await SendToPtyAsync(sequence, resumeAutoScroll: !isModifierOnly).ConfigureAwait(false);
                         return;
                     }
                     // If we couldn't generate a Win32 sequence, fall through to normal handling
@@ -1062,7 +1065,7 @@ namespace Iciclecreek.Terminal
                     if (!string.IsNullOrEmpty(sequence))
                     {
                         e.Handled = true;
-                        await SendToPtyAsync(sequence).ConfigureAwait(false);
+                        await SendToPtyAsync(sequence, resumeAutoScroll: true).ConfigureAwait(false);
                     }
                     return;
                 }
@@ -1076,7 +1079,7 @@ namespace Iciclecreek.Terminal
                         if (!string.IsNullOrEmpty(sequence))
                         {
                             e.Handled = true;
-                            await SendToPtyAsync(sequence).ConfigureAwait(false);
+                            await SendToPtyAsync(sequence, resumeAutoScroll: true).ConfigureAwait(false);
                         }
                     }
                     return;
@@ -1087,7 +1090,7 @@ namespace Iciclecreek.Terminal
                 if (TryGetPrintableChar(e, out var printableChar))
                 {
                     e.Handled = true;
-                    await SendToPtyAsync(printableChar.ToString()).ConfigureAwait(false);
+                    await SendToPtyAsync(printableChar.ToString(), resumeAutoScroll: true).ConfigureAwait(false);
                     return;
                 }
 
@@ -1175,7 +1178,7 @@ namespace Iciclecreek.Terminal
             try
             {
                 Debug.WriteLine($"[TerminalView] OnTextInput: Sending '{e.Text}' to PTY");
-                await SendToPtyAsync(e.Text).ConfigureAwait(false);
+                await SendToPtyAsync(e.Text, resumeAutoScroll: true).ConfigureAwait(false);
                 e.Handled = true;
             }
             catch (Exception ex)
@@ -1687,15 +1690,19 @@ namespace Iciclecreek.Terminal
 
         private readonly SemaphoreSlim _semaphore = new SemaphoreSlim(1, 1);
 
-        private async Task SendToPtyAsync(string data, CancellationToken ct = default)
+        private Task SendToPtyAsync(string data, CancellationToken ct = default)
+            => SendToPtyAsync(data, resumeAutoScroll: false, ct);
+
+        private async Task SendToPtyAsync(string data, bool resumeAutoScroll, CancellationToken ct = default)
         {
             // Capture the connection reference locally to avoid any potential race conditions
             var ptyConnection = _ptyConnection;
             if (ptyConnection == null || string.IsNullOrEmpty(data))
                 return;
 
-            // User typed something — resume auto-scroll
-            if (_userScrolledUp && AutoScrollToBottom)
+            // Resume auto-scroll only for actual user input (typing, paste),
+            // not for control signals (focus events, mouse forwarding, modifier keys).
+            if (resumeAutoScroll && _userScrolledUp && AutoScrollToBottom)
             {
                 _userScrolledUp = false;
                 lock (_terminalLock)
