@@ -553,9 +553,9 @@ namespace Iciclecreek.Terminal
 
         public XTerm.Terminal Terminal => _terminal;
 
-        public void WaitForExit(int ms) => _ptyConnection!.WaitForExit(ms);
+        public void WaitForExit(int ms) => _ptyConnection?.WaitForExit(ms);
 
-        public void Kill() => _ptyConnection!.Kill();
+        public void Kill() => _ptyConnection?.Kill();
 
         /// <summary>
         /// Pastes text from the clipboard into the terminal.
@@ -615,7 +615,7 @@ namespace Iciclecreek.Terminal
         /// <summary>
         /// Gets the exit code of the launched PTY process after it has terminated.
         /// </summary>
-        public int ExitCode => _ptyConnection!.ExitCode;
+        public int ExitCode => _ptyConnection?.ExitCode ?? -1;
 
         /// <summary>
         /// Gets the operating system process identifier of the launched PTY process.
@@ -921,6 +921,23 @@ namespace Iciclecreek.Terminal
             }
         }
 
+        // macOS uses the Command (⌘ / Meta) key for clipboard shortcuts, following native
+        // platform conventions (Terminal.app, iTerm2, etc.). Windows and Linux terminals use
+        // Ctrl+Shift+C / Ctrl+Shift+V instead, because plain Ctrl+C is reserved for SIGINT.
+        private static readonly bool IsMacOS = RuntimeInformation.IsOSPlatform(OSPlatform.OSX);
+
+        // True when the key is a modifier pressed on its own (no associated character),
+        // e.g. the ⌘/Ctrl/Shift/Alt keys. Used so a bare modifier press doesn't clear
+        // an active selection before the rest of a copy shortcut is typed.
+        private static bool IsModifierKey(Key key) => key switch
+        {
+            Key.LeftShift or Key.RightShift or
+            Key.LeftCtrl or Key.RightCtrl or
+            Key.LeftAlt or Key.RightAlt or
+            Key.LWin or Key.RWin => true,
+            _ => false,
+        };
+
         protected override async void OnKeyDown(KeyEventArgs e)
         {
             // Only process input if this terminal has focus
@@ -946,7 +963,8 @@ namespace Iciclecreek.Terminal
             {
                 bool isCopy = e.Key == Key.C &&
                               (e.KeyModifiers == KeyModifiers.Control ||
-                               e.KeyModifiers == (KeyModifiers.Control | KeyModifiers.Shift));
+                               e.KeyModifiers == (KeyModifiers.Control | KeyModifiers.Shift) ||
+                               (IsMacOS && e.KeyModifiers == KeyModifiers.Meta));
                 if (isCopy && _terminal.Selection.HasSelection)
                 {
                     e.Handled = true;
@@ -963,6 +981,34 @@ namespace Iciclecreek.Terminal
 
             try
             {
+                // macOS clipboard shortcuts use the Command (Meta) key. These don't collide
+                // with terminal control codes (SIGINT is Ctrl+C, not Cmd+C), so we can handle
+                // them directly here. On Windows/Linux this block is skipped and the
+                // Ctrl / Ctrl+Shift shortcuts below are used instead.
+                if (IsMacOS && e.KeyModifiers == KeyModifiers.Meta)
+                {
+                    // Cmd+C - copy the selection (no-op when nothing is selected, matching macOS)
+                    if (e.Key == Key.C)
+                    {
+                        e.Handled = true;
+                        if (_terminal.Selection.HasSelection)
+                        {
+                            await CopyAsync();
+                            _terminal.Selection.ClearSelection();
+                            this.RequestInvalidate();
+                        }
+                        return;
+                    }
+
+                    // Cmd+V - paste from the clipboard
+                    if (e.Key == Key.V)
+                    {
+                        e.Handled = true;
+                        await PasteAsync();
+                        return;
+                    }
+                }
+
                 // Handle Ctrl+C - copy if there's a selection, otherwise send SIGINT
                 if (e.Key == Key.C && e.KeyModifiers == KeyModifiers.Control)
                 {
@@ -990,8 +1036,11 @@ namespace Iciclecreek.Terminal
                     }
                 }
 
-                // Clear selection for any other keystroke
-                if (_terminal.Selection.HasSelection)
+                // Clear selection for any other keystroke - but ignore bare modifier
+                // presses. Pressing ⌘/Ctrl/Shift on its own fires a KeyDown before the
+                // shortcut's letter arrives; clearing here would lose the selection
+                // before Cmd+C / Ctrl+Shift+C could copy it.
+                if (_terminal.Selection.HasSelection && !IsModifierKey(e.Key))
                 {
                     _terminal.Selection.ClearSelection();
                     this.RequestInvalidate();
@@ -2031,6 +2080,11 @@ namespace Iciclecreek.Terminal
                             }
 
                             this.RequestInvalidate();
+                            
+                            await Dispatcher.UIThread.InvokeAsync(() =>
+                            {
+                                ProcessExited?.Invoke(this, new ProcessExitedEventArgs(exitCode));
+                            });
                         }
                         break;
                     }
