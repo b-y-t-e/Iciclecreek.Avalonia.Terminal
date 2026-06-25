@@ -66,6 +66,10 @@ namespace Iciclecreek.Terminal
         private volatile bool _userScrolledUp;
         private volatile bool _autoScrollToBottom = true;
 
+        // Debounce PTY resize so the shell redraws only once after the user stops dragging.
+        private DispatcherTimer? _ptyResizeTimer;
+        private static readonly TimeSpan PtyResizeDelay = TimeSpan.FromMilliseconds(100);
+
         // Fires ShellReady exactly once after the first PTY output chunk.
         private int _shellReadyFired; // 0=not yet, 1=fired
 
@@ -450,6 +454,7 @@ namespace Iciclecreek.Terminal
 #pragma warning restore CS8618 // Non-nullable field must contain a non-null value when exiting constructor. Consider adding the 'required' modifier or declaring as nullable.
         {
             Focusable = true;
+            ClipToBounds = true;
             Loaded += OnLoaded;
             Unloaded += OnUnloaded;
             TextInputMethodClientRequested += OnTextInputMethodClientRequested;
@@ -2176,6 +2181,7 @@ namespace Iciclecreek.Terminal
 
         private void CleanupProcess()
         {
+            _ptyResizeTimer?.Stop();
             _processCts?.Cancel();
 
             if (_ptyConnection != null)
@@ -2234,18 +2240,22 @@ namespace Iciclecreek.Terminal
                 // Only resize if dimensions have changed
                 if (newCols != _terminal.Cols || newRows != _terminal.Rows)
                 {
-                    _terminal.Resize(newCols, newRows);
+                    lock (_terminalLock)
+                    {
+                        _terminal.Resize(newCols, newRows);
 
-                    // Also resize the PTY connection if it exists
-                    _ptyConnection?.Resize(newCols, newRows);
+                        var max = MaxScrollback;
+                        if (_terminal.Buffer.ViewportY > max)
+                            _terminal.Buffer.ViewportY = max;
+                    }
 
-                    var max = MaxScrollback;
-                    if (_terminal.Buffer.ViewportY > max)
-                        _terminal.Buffer.ViewportY = max;
+                    DebouncePtyResize();
 
                     RaisePropertyChanged(ViewportLinesProperty, default(int), ViewportLines);
-                    RaisePropertyChanged(MaxScrollbackProperty, default(int), max);
+                    RaisePropertyChanged(MaxScrollbackProperty, default(int), MaxScrollback);
                     RaisePropertyChanged(ViewportYProperty, default(int), _terminal.Buffer.ViewportY);
+
+                    this.RequestInvalidate();
                 }
             }
 
@@ -2253,34 +2263,53 @@ namespace Iciclecreek.Terminal
         }
 
 
+        private void DebouncePtyResize()
+        {
+            if (_ptyResizeTimer == null)
+            {
+                _ptyResizeTimer = new DispatcherTimer { Interval = PtyResizeDelay };
+                _ptyResizeTimer.Tick += (_, _) =>
+                {
+                    _ptyResizeTimer.Stop();
+                    _ptyConnection?.Resize(_terminal.Cols, _terminal.Rows);
+                };
+            }
+
+            _ptyResizeTimer.Stop();
+            _ptyResizeTimer.Start();
+        }
+
         public override void Render(DrawingContext context)
         {
             var scale = TopLevel.GetTopLevel(this)?.RenderScaling ?? 1.0;
-            //Debug.WriteLine("======");
-            //Debug.WriteLine(_terminal.Buffer.PrintViewport());
 
-            // Use the terminal buffer's ViewportY to determine what to render
-            int viewportY = _terminal.Buffer.ViewportY;
-            int viewportLines = _terminal.Rows;
-            int startLine = viewportY;
-            int endLine = Math.Min(_terminal.Buffer.Length, startLine + viewportLines);
+            context.FillRectangle(Background ?? global::Avalonia.Media.Brushes.Black, new Rect(Bounds.Size));
+
             try
             {
-
-                for (int y = startLine; y < endLine; y++)
+                int viewportY;
+                BufferLine?[] lines;
+                lock (_terminalLock)
                 {
-                    var line = _terminal.Buffer.GetLine(y);
+                    viewportY = _terminal.Buffer.ViewportY;
+                    int viewportLines = _terminal.Rows;
+                    int endLine = Math.Min(_terminal.Buffer.Length, viewportY + viewportLines);
+                    int lineCount = endLine - viewportY;
+                    lines = new BufferLine?[lineCount];
+                    for (int i = 0; i < lineCount; i++)
+                        lines[i] = _terminal.Buffer.GetLine(viewportY + i);
+                }
+
+                for (int screenY = 0; screenY < lines.Length; screenY++)
+                {
+                    var line = lines[screenY];
                     if (line == null)
                         continue;
 
-                    int screenY = y - startLine;
-
-                    // Calculate Y positions for this screen row
                     var startYPos = Snap(screenY * _charHeight, scale);
                     var endYPos = Snap((screenY + 1) * _charHeight, scale);
                     var rowHeight = Math.Max(0, endYPos - startYPos);
 
-                    // Check for double-width/double-height line attributes
                     var lineAttr = line.LineAttribute;
                     if (lineAttr == LineAttribute.DoubleWidth ||
                              lineAttr == LineAttribute.DoubleHeightTop ||
