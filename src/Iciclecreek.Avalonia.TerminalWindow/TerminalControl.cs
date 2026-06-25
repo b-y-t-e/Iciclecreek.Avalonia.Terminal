@@ -18,6 +18,7 @@ namespace Iciclecreek.Terminal
         private ScrollBar? _scrollBar;
         private string? _currentDirectory;
         private bool _isRunning;
+        private bool _isOutputActive;
 
 
         public static readonly StyledProperty<TextDecorationLocation?> TextDecorationsProperty =
@@ -54,6 +55,11 @@ namespace Iciclecreek.Terminal
             AvaloniaProperty.RegisterDirect<TerminalControl, bool>(
                 nameof(IsRunning),
                 o => o.IsRunning);
+
+        public static readonly DirectProperty<TerminalControl, bool> IsOutputActiveProperty =
+            AvaloniaProperty.RegisterDirect<TerminalControl, bool>(
+                nameof(IsOutputActive),
+                o => o.IsOutputActive);
 
         public static readonly StyledProperty<int> BufferSizeProperty =
                   AvaloniaProperty.Register<TerminalControl, int>(
@@ -219,6 +225,13 @@ namespace Iciclecreek.Terminal
             private set => SetAndRaise(IsRunningProperty, ref _isRunning, value);
         }
 
+        /// <inheritdoc cref="TerminalView.IsOutputActive"/>
+        public bool IsOutputActive
+        {
+            get => _isOutputActive;
+            private set => SetAndRaise(IsOutputActiveProperty, ref _isOutputActive, value);
+        }
+
         /// <summary>
         /// Gets the exit code of the launched process after it has terminated.
         /// </summary>
@@ -357,6 +370,10 @@ namespace Iciclecreek.Terminal
             else if (e.Property == TerminalView.IsRunningProperty)
             {
                 IsRunning = _terminalView?.IsRunning ?? false;
+            }
+            else if (e.Property == TerminalView.IsOutputActiveProperty)
+            {
+                IsOutputActive = _terminalView?.IsOutputActive ?? false;
             }
         }
 

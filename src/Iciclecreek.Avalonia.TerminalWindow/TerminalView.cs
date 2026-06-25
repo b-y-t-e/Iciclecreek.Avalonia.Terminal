@@ -67,6 +67,11 @@ namespace Iciclecreek.Terminal
         private volatile bool _userScrolledUp;
         private volatile bool _autoScrollToBottom = true;
 
+        // Activity detection — true while PTY output is flowing, resets after idle timeout.
+        private bool _isOutputActive;
+        private DispatcherTimer? _outputIdleTimer;
+        private static readonly TimeSpan OutputIdleTimeout = TimeSpan.FromSeconds(1);
+
         // Debounce PTY resize so the shell redraws only once after the user stops dragging.
         private DispatcherTimer? _ptyResizeTimer;
         private static readonly TimeSpan PtyResizeDelay = TimeSpan.FromMilliseconds(100);
@@ -119,6 +124,11 @@ namespace Iciclecreek.Terminal
             AvaloniaProperty.RegisterDirect<TerminalView, bool>(
                 nameof(IsRunning),
                 o => o.IsRunning);
+
+        public static readonly DirectProperty<TerminalView, bool> IsOutputActiveProperty =
+            AvaloniaProperty.RegisterDirect<TerminalView, bool>(
+                nameof(IsOutputActive),
+                o => o.IsOutputActive);
 
         public static readonly StyledProperty<FontFamily> FontFamilyProperty =
             AvaloniaProperty.Register<TerminalView, FontFamily>(
@@ -651,6 +661,16 @@ namespace Iciclecreek.Terminal
         {
             get => _isRunning;
             private set => SetAndRaise(IsRunningProperty, ref _isRunning, value);
+        }
+
+        /// <summary>
+        /// Gets whether the terminal is actively receiving output from the PTY process.
+        /// Becomes true when data arrives and resets to false after a short idle period.
+        /// </summary>
+        public bool IsOutputActive
+        {
+            get => _isOutputActive;
+            private set => SetAndRaise(IsOutputActiveProperty, ref _isOutputActive, value);
         }
 
         /// <summary>
@@ -2108,6 +2128,7 @@ namespace Iciclecreek.Terminal
 
                     var output = Encoding.UTF8.GetString(buffer, 0, bytesRead);
 
+                    Dispatcher.UIThread.Post(SignalOutputActivity);
                     Dispatcher.UIThread.Post(() => OutputReceived?.Invoke(this, output));
 
                     var oldMax = MaxScrollback;
@@ -2174,6 +2195,25 @@ namespace Iciclecreek.Terminal
             }
         }
 
+        private void SignalOutputActivity()
+        {
+            if (!_isOutputActive)
+                IsOutputActive = true;
+
+            if (_outputIdleTimer == null)
+            {
+                _outputIdleTimer = new DispatcherTimer { Interval = OutputIdleTimeout };
+                _outputIdleTimer.Tick += (_, _) =>
+                {
+                    _outputIdleTimer.Stop();
+                    IsOutputActive = false;
+                };
+            }
+
+            _outputIdleTimer.Stop();
+            _outputIdleTimer.Start();
+        }
+
         private void OnPtyProcessExited(object? sender, PtyExitedEventArgs e)
         {
             // Interlocked ensures only one of (event, EOF path, exception path) prints the message.
@@ -2190,6 +2230,8 @@ namespace Iciclecreek.Terminal
 
             Dispatcher.UIThread.InvokeAsync(() =>
             {
+                _outputIdleTimer?.Stop();
+                IsOutputActive = false;
                 IsRunning = false;
 
                 var args = new ProcessExitedEventArgs(e.ExitCode);
@@ -2201,6 +2243,8 @@ namespace Iciclecreek.Terminal
         {
             Dispatcher.UIThread.VerifyAccess();
             IsRunning = false;
+            _outputIdleTimer?.Stop();
+            IsOutputActive = false;
             _ptyResizeTimer?.Stop();
             _processCts?.Cancel();
 
