@@ -47,6 +47,7 @@ namespace Iciclecreek.Terminal
         private static readonly Encoding Utf8NoBom = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false);
         private int _processExitHandled;    // 0=false, 1=true — written via Interlocked
         private readonly object _terminalLock = new object(); // Serialises all _terminal.Write/WriteLine calls
+        private bool _isRunning;
 
         // Cursor blinking
         private DispatcherTimer _cursorBlinkTimer;
@@ -113,6 +114,11 @@ namespace Iciclecreek.Terminal
             AvaloniaProperty.RegisterDirect<TerminalView, string?>(
                 nameof(CurrentDirectory),
                 o => o.CurrentDirectory);
+
+        public static readonly DirectProperty<TerminalView, bool> IsRunningProperty =
+            AvaloniaProperty.RegisterDirect<TerminalView, bool>(
+                nameof(IsRunning),
+                o => o.IsRunning);
 
         public static readonly StyledProperty<FontFamily> FontFamilyProperty =
             AvaloniaProperty.Register<TerminalView, FontFamily>(
@@ -636,6 +642,15 @@ namespace Iciclecreek.Terminal
             }
 
             return false;
+        }
+
+        /// <summary>
+        /// Gets whether the PTY process is currently running.
+        /// </summary>
+        public bool IsRunning
+        {
+            get => _isRunning;
+            private set => SetAndRaise(IsRunningProperty, ref _isRunning, value);
         }
 
         /// <summary>
@@ -2030,6 +2045,7 @@ namespace Iciclecreek.Terminal
                 }
 
                 _ptyConnection = await PtyProvider.SpawnAsync(options, _processCts.Token);
+                IsRunning = true;
 
                 // Subscribe to process exit event for reliable exit detection
                 _ptyConnection.ProcessExited += OnPtyProcessExited;
@@ -2084,6 +2100,7 @@ namespace Iciclecreek.Terminal
                                 _terminal.Buffer.ScrollToBottom();
                             }
 
+                            Dispatcher.UIThread.Post(() => IsRunning = false);
                             this.RequestInvalidate();
                         }
                         break;
@@ -2173,7 +2190,8 @@ namespace Iciclecreek.Terminal
 
             Dispatcher.UIThread.InvokeAsync(() =>
             {
-                // Raise event on UI thread so subscribers can safely update UI
+                IsRunning = false;
+
                 var args = new ProcessExitedEventArgs(e.ExitCode);
                 ProcessExited?.Invoke(this, args);
             });
@@ -2181,6 +2199,8 @@ namespace Iciclecreek.Terminal
 
         private void CleanupProcess()
         {
+            Dispatcher.UIThread.VerifyAccess();
+            IsRunning = false;
             _ptyResizeTimer?.Stop();
             _processCts?.Cancel();
 
