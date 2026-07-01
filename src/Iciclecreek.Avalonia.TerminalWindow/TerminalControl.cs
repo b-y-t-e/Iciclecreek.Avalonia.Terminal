@@ -66,6 +66,11 @@ namespace Iciclecreek.Terminal
                       nameof(BufferSize),
                       defaultValue: 1000);
 
+        public static readonly StyledProperty<bool> CopyOnSelectProperty =
+            AvaloniaProperty.Register<TerminalControl, bool>(
+                nameof(CopyOnSelect),
+                defaultValue: false);
+
         public static readonly StyledProperty<XTerm.Options.TerminalOptions?> OptionsProperty =
             AvaloniaProperty.Register<TerminalControl, XTerm.Options.TerminalOptions?>(
                 nameof(Options),
@@ -221,8 +226,8 @@ namespace Iciclecreek.Terminal
         /// <inheritdoc cref="TerminalView.CopyOnSelectProperty"/>
         public bool CopyOnSelect
         {
-            get => _terminalView?.CopyOnSelect ?? false;
-            set { if (_terminalView != null) _terminalView.CopyOnSelect = value; }
+            get => GetValue(CopyOnSelectProperty);
+            set => SetValue(CopyOnSelectProperty, value);
         }
 
         /// <inheritdoc cref="TerminalView.IsRunning"/>
@@ -292,6 +297,14 @@ namespace Iciclecreek.Terminal
             await LaunchProcess();
         }
 
+        protected override void OnPropertyChanged(AvaloniaPropertyChangedEventArgs change)
+        {
+            base.OnPropertyChanged(change);
+
+            if (change.Property == CopyOnSelectProperty && _terminalView != null)
+                _terminalView.CopyOnSelect = (bool)change.NewValue!;
+        }
+
         protected override void OnGotFocus(FocusChangedEventArgs e)
         {
             base.OnGotFocus(e);
@@ -343,6 +356,7 @@ namespace Iciclecreek.Terminal
             {
                 _scrollBar.Scroll += OnScrollBarScroll;
                 _terminalView.Options = Options ?? new XTerm.Options.TerminalOptions();
+                _terminalView.CopyOnSelect = CopyOnSelect;
                 _terminalView.PropertyChanged += OnTerminalViewPropertyChanged;
                 _terminalView.ProcessExited += OnTerminalViewProcessExited;
                 _terminalView.ShellReady += OnTerminalViewShellReady;
