@@ -218,6 +218,13 @@ namespace Iciclecreek.Terminal
             set { if (_terminalView != null) _terminalView.ShowCaretOnClick = value; }
         }
 
+        /// <inheritdoc cref="TerminalView.CopyOnSelectProperty"/>
+        public bool CopyOnSelect
+        {
+            get => _terminalView?.CopyOnSelect ?? false;
+            set { if (_terminalView != null) _terminalView.CopyOnSelect = value; }
+        }
+
         /// <inheritdoc cref="TerminalView.IsRunning"/>
         public bool IsRunning
         {

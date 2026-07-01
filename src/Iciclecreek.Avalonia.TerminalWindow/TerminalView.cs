@@ -230,6 +230,23 @@ namespace Iciclecreek.Terminal
             set => SetValue(ShowCaretOnClickProperty, value);
         }
 
+        /// <summary>
+        /// When <see langword="true"/>, selected text is automatically copied to the
+        /// clipboard as soon as the mouse button is released (X11-style selection).
+        /// Applies to normal, word (double-click) and line (triple-click) selection.
+        /// Default is <see langword="false"/>.
+        /// </summary>
+        public static readonly StyledProperty<bool> CopyOnSelectProperty =
+            AvaloniaProperty.Register<TerminalView, bool>(
+                nameof(CopyOnSelect),
+                defaultValue: false);
+
+        public bool CopyOnSelect
+        {
+            get => GetValue(CopyOnSelectProperty);
+            set => SetValue(CopyOnSelectProperty, value);
+        }
+
         public static readonly StyledProperty<XTerm.Options.TerminalOptions?> OptionsProperty =
             AvaloniaProperty.Register<TerminalControl, XTerm.Options.TerminalOptions?>(
                 nameof(Options),
@@ -1350,6 +1367,8 @@ namespace Iciclecreek.Terminal
                     else
                     {
                         _terminal.Selection.EndSelection();
+                        if (CopyOnSelect && _terminal.Selection.HasSelection)
+                            await CopyAsync();
                     }
                     _isSelecting = false;
                     e.Handled = true;
