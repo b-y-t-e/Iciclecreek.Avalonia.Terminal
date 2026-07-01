@@ -1024,6 +1024,11 @@ namespace Iciclecreek.Terminal
 
             try
             {
+                bool isModifierOnlyKey = e.Key is Key.LeftCtrl or Key.RightCtrl
+                    or Key.LeftShift or Key.RightShift
+                    or Key.LeftAlt or Key.RightAlt
+                    or Key.LWin or Key.RWin;
+
                 // Handle Ctrl+C - copy if there's a selection, otherwise send SIGINT
                 if (e.Key == Key.C && e.KeyModifiers == KeyModifiers.Control)
                 {
@@ -1051,8 +1056,10 @@ namespace Iciclecreek.Terminal
                     }
                 }
 
-                // Clear selection for any other keystroke
-                if (_terminal.Selection.HasSelection)
+                // Clear selection for any other keystroke, but not for modifier-only
+                // keys — otherwise pressing Ctrl before C clears the selection
+                // and breaks Ctrl+C copy.
+                if (_terminal.Selection.HasSelection && !isModifierOnlyKey)
                 {
                     _terminal.Selection.ClearSelection();
                     this.RequestInvalidate();
@@ -1084,11 +1091,7 @@ namespace Iciclecreek.Terminal
                     if (!string.IsNullOrEmpty(sequence))
                     {
                         e.Handled = true;
-                        bool isModifierOnly = e.Key is Key.LeftCtrl or Key.RightCtrl
-                            or Key.LeftShift or Key.RightShift
-                            or Key.LeftAlt or Key.RightAlt
-                            or Key.LWin or Key.RWin;
-                        await SendToPtyAsync(sequence, resumeAutoScroll: !isModifierOnly).ConfigureAwait(false);
+                        await SendToPtyAsync(sequence, resumeAutoScroll: !isModifierOnlyKey).ConfigureAwait(false);
                         return;
                     }
                     // If we couldn't generate a Win32 sequence, fall through to normal handling
