@@ -6,8 +6,8 @@
   </PropertyGroup>
   <PropertyGroup>
     <PackageId>MTerminal.Avalonia.Terminal</PackageId>
-    <Version>2.7.3</Version>
-    <AssemblyVersion>2.7.3.0</AssemblyVersion>
+    <Version>2.7.2</Version>
+    <AssemblyVersion>2.7.2.0</AssemblyVersion>
     <Description>Fork of Iciclecreek.Avalonia.Terminal with URL detection, scroll fixes, and ShellReady/OutputReceived events. Provides XTerm console for hosting console applications in Avalonia.</Description>
     <Company>b-y-t-e</Company>
     <Authors>b-y-t-e</Authors>
