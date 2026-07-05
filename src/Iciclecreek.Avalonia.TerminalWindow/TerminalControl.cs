@@ -71,6 +71,16 @@ namespace Iciclecreek.Terminal
                 nameof(CopyOnSelect),
                 defaultValue: false);
 
+        public static readonly StyledProperty<bool> PasteOnCtrlVProperty =
+            AvaloniaProperty.Register<TerminalControl, bool>(
+                nameof(PasteOnCtrlV),
+                defaultValue: false);
+
+        public static readonly StyledProperty<bool> SelectionOverridesMouseTrackingProperty =
+            AvaloniaProperty.Register<TerminalControl, bool>(
+                nameof(SelectionOverridesMouseTracking),
+                defaultValue: false);
+
         public static readonly StyledProperty<XTerm.Options.TerminalOptions?> OptionsProperty =
             AvaloniaProperty.Register<TerminalControl, XTerm.Options.TerminalOptions?>(
                 nameof(Options),
@@ -230,6 +240,20 @@ namespace Iciclecreek.Terminal
             set => SetValue(CopyOnSelectProperty, value);
         }
 
+        /// <inheritdoc cref="TerminalView.PasteOnCtrlVProperty"/>
+        public bool PasteOnCtrlV
+        {
+            get => GetValue(PasteOnCtrlVProperty);
+            set => SetValue(PasteOnCtrlVProperty, value);
+        }
+
+        /// <inheritdoc cref="TerminalView.SelectionOverridesMouseTrackingProperty"/>
+        public bool SelectionOverridesMouseTracking
+        {
+            get => GetValue(SelectionOverridesMouseTrackingProperty);
+            set => SetValue(SelectionOverridesMouseTrackingProperty, value);
+        }
+
         /// <inheritdoc cref="TerminalView.IsRunning"/>
         public bool IsRunning
         {
@@ -270,15 +294,10 @@ namespace Iciclecreek.Terminal
             if (_terminalView == null)
                 throw new InvalidOperationException("TerminalControl template has not been applied yet.");
 
+            // Note: deliberately no Focus() here. Grabbing focus after every launch made
+            // focus hop across tiles on startup (each tile launches its shell) and steal
+            // focus on auto-relaunch. Focus management belongs to the hosting app.
             await _terminalView.LaunchProcess();
-
-            Dispatcher.UIThread.Post(() =>
-            {
-                if (_terminalView != null && !_terminalView.IsFocused)
-                {
-                    _terminalView.Focus();
-                }
-            }, DispatcherPriority.Input);
         }
 
         /// <summary>
@@ -303,16 +322,23 @@ namespace Iciclecreek.Terminal
 
             if (change.Property == CopyOnSelectProperty && _terminalView != null)
                 _terminalView.CopyOnSelect = (bool)change.NewValue!;
+
+            if (change.Property == PasteOnCtrlVProperty && _terminalView != null)
+                _terminalView.PasteOnCtrlV = (bool)change.NewValue!;
+
+            if (change.Property == SelectionOverridesMouseTrackingProperty && _terminalView != null)
+                _terminalView.SelectionOverridesMouseTracking = (bool)change.NewValue!;
         }
 
         protected override void OnGotFocus(FocusChangedEventArgs e)
         {
             base.OnGotFocus(e);
 
-            // Only focus the inner TerminalView if it doesn't already have focus
+            // Hand focus to the inner TerminalView. Must stay deferred: calling Focus()
+            // while a focus change is still being processed re-enters OnGotFocus before
+            // IsFocused has settled and causes a focus-event storm.
             if (_terminalView != null && !_terminalView.IsFocused)
             {
-                // Defer until layout is ready
                 Dispatcher.UIThread.Post(() =>
                 {
                     if (_terminalView != null && !_terminalView.IsFocused)
@@ -357,6 +383,8 @@ namespace Iciclecreek.Terminal
                 _scrollBar.Scroll += OnScrollBarScroll;
                 _terminalView.Options = Options ?? new XTerm.Options.TerminalOptions();
                 _terminalView.CopyOnSelect = CopyOnSelect;
+                _terminalView.PasteOnCtrlV = PasteOnCtrlV;
+                _terminalView.SelectionOverridesMouseTracking = SelectionOverridesMouseTracking;
                 _terminalView.PropertyChanged += OnTerminalViewPropertyChanged;
                 _terminalView.ProcessExited += OnTerminalViewProcessExited;
                 _terminalView.ShellReady += OnTerminalViewShellReady;

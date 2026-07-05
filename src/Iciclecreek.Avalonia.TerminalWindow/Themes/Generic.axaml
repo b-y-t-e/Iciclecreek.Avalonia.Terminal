@@ -26,6 +26,7 @@
                     <ScrollBar Name="PART_ScrollBar"
                               Grid.Column="1"
                               Orientation="Vertical"
+                              Focusable="False"
                               AllowAutoHide="False"/>
                 </Grid>
             </ControlTemplate>

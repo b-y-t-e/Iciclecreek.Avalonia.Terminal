@@ -247,6 +247,43 @@ namespace Iciclecreek.Terminal
             set => SetValue(CopyOnSelectProperty, value);
         }
 
+        /// <summary>
+        /// When <see langword="true"/>, plain Ctrl+V pastes clipboard text into the
+        /// terminal. If the clipboard holds no text (e.g. an image), the Ctrl+V
+        /// keystroke is forwarded to the application instead, so TUI apps that read
+        /// the clipboard themselves (image paste) still receive the key.
+        /// When <see langword="false"/> (default), Ctrl+V is always forwarded raw.
+        /// Ctrl+Shift+V always pastes regardless of this setting.
+        /// </summary>
+        public static readonly StyledProperty<bool> PasteOnCtrlVProperty =
+            AvaloniaProperty.Register<TerminalView, bool>(
+                nameof(PasteOnCtrlV),
+                defaultValue: false);
+
+        public bool PasteOnCtrlV
+        {
+            get => GetValue(PasteOnCtrlVProperty);
+            set => SetValue(PasteOnCtrlVProperty, value);
+        }
+
+        /// <summary>
+        /// When <see langword="true"/>, mouse selection always wins over application
+        /// mouse tracking: left-drag selects text locally even while a TUI app has
+        /// enabled mouse reporting (wheel scrolling is still forwarded to the app).
+        /// When <see langword="false"/> (default, xterm-style), mouse events are
+        /// forwarded to the app and selection requires Shift+drag.
+        /// </summary>
+        public static readonly StyledProperty<bool> SelectionOverridesMouseTrackingProperty =
+            AvaloniaProperty.Register<TerminalView, bool>(
+                nameof(SelectionOverridesMouseTracking),
+                defaultValue: false);
+
+        public bool SelectionOverridesMouseTracking
+        {
+            get => GetValue(SelectionOverridesMouseTrackingProperty);
+            set => SetValue(SelectionOverridesMouseTrackingProperty, value);
+        }
+
         public static readonly StyledProperty<XTerm.Options.TerminalOptions?> OptionsProperty =
             AvaloniaProperty.Register<TerminalControl, XTerm.Options.TerminalOptions?>(
                 nameof(Options),
@@ -619,14 +656,14 @@ namespace Iciclecreek.Terminal
         /// <summary>
         /// Pastes text from the clipboard into the terminal.
         /// </summary>
-        public async Task PasteAsync()
+        public async Task<bool> PasteAsync()
         {
             if (_ptyConnection == null)
-                return;
+                return false;
 
             var clipboard = TopLevel.GetTopLevel(this)?.Clipboard;
             if (clipboard == null)
-                return;
+                return false;
 
             var text = await clipboard.TryGetTextAsync();
             if (!string.IsNullOrEmpty(text))
@@ -638,8 +675,21 @@ namespace Iciclecreek.Terminal
                 }
 
                 await SendToPtyAsync(text, resumeAutoScroll: true);
+                return true;
             }
+
+            return false;
         }
+
+        /// <summary>
+        /// Gets whether the terminal currently has a text selection.
+        /// </summary>
+        public bool HasSelection => _terminal?.Selection.HasSelection ?? false;
+
+        /// <summary>
+        /// Sends text to the PTY as if typed by the user.
+        /// </summary>
+        public Task SendTextAsync(string text) => SendToPtyAsync(text, resumeAutoScroll: true);
 
         /// <summary>
         /// Copies selected text to the clipboard.
@@ -1083,12 +1133,29 @@ namespace Iciclecreek.Terminal
                 }
 
                 // Handle Ctrl+Shift+V for paste (standard terminal shortcut)
-                // Ctrl+V is NOT intercepted - it gets passed to the application
-                // (some apps use Ctrl+V for literal character input mode)
                 if (e.Key == Key.V && e.KeyModifiers == (KeyModifiers.Control | KeyModifiers.Shift))
                 {
                     e.Handled = true;
                     await PasteAsync();
+                    return;
+                }
+
+                // Plain Ctrl+V: by default forwarded to the application (some apps use it
+                // for literal character input). With PasteOnCtrlV enabled, clipboard text
+                // is pasted; when the clipboard holds no text (e.g. an image) the keystroke
+                // is still forwarded so apps that read the clipboard themselves (image
+                // paste in TUI apps like Claude Code) receive it.
+                if (PasteOnCtrlV && e.Key == Key.V && e.KeyModifiers == KeyModifiers.Control)
+                {
+                    e.Handled = true;
+                    if (!await PasteAsync())
+                    {
+                        var ctrlV = _terminal.Win32InputMode
+                            ? GenerateWin32InputSequence(e, isKeyDown: true)
+                            : _terminal.GenerateCharInput('v', ConvertAvaloniaModifiers(e.KeyModifiers));
+                        if (!string.IsNullOrEmpty(ctrlV))
+                            await SendToPtyAsync(ctrlV, resumeAutoScroll: true).ConfigureAwait(false);
+                    }
                     return;
                 }
 
@@ -1876,6 +1943,10 @@ namespace Iciclecreek.Terminal
         /// </summary>
         private bool ShouldHandleSelection(KeyModifiers modifiers)
         {
+            // Selection-first mode: local selection always wins over app mouse tracking.
+            if (SelectionOverridesMouseTracking)
+                return true;
+
             bool appWantsMouse = _terminal.MouseTrackingMode != XT.Input.MouseTrackingMode.None;
             bool shiftHeld = modifiers.HasFlag(KeyModifiers.Shift);
 
@@ -2054,6 +2125,7 @@ namespace Iciclecreek.Terminal
         public async Task LaunchProcess()
         {
             CleanupProcess();
+            ResetInputModes();
 
             try
             {
@@ -2118,6 +2190,26 @@ namespace Iciclecreek.Terminal
             Process = process;
             Args = args ?? Array.Empty<string>();
             await LaunchProcess();
+        }
+
+        // A crashed or killed TUI app (vim, opencode, claude) leaves input modes enabled:
+        // win32-input-mode, mouse tracking, bracketed paste, alternate screen. They are
+        // terminal state, not process state, so they survive a PTY restart and corrupt
+        // input handling of the next session. Reset them by feeding the standard
+        // "disable" sequences through the parser before launching a new process.
+        private void ResetInputModes()
+        {
+            var esc = (char)27;
+            lock (_terminalLock)
+            {
+                _terminal.Write(
+                    $"{esc}[?9001l" +   // win32-input-mode
+                    $"{esc}[?1000l{esc}[?1002l{esc}[?1003l" + // mouse tracking
+                    $"{esc}[?1005l{esc}[?1006l{esc}[?1015l" + // mouse encodings
+                    $"{esc}[?1004l" +   // focus events
+                    $"{esc}[?2004l" +   // bracketed paste
+                    $"{esc}[?1049l");   // alternate screen buffer
+            }
         }
 
         private async Task ReadPtyOutputAsync(CancellationToken cancellationToken)
@@ -2853,6 +2945,11 @@ namespace Iciclecreek.Terminal
         /// Generates a Win32 INPUT_RECORD format escape sequence.
         /// Format: ESC [ Vk ; Sc ; Uc ; Kd ; Cs ; Rc _
         /// </summary>
+        private const uint MAPVK_VK_TO_VSC = 0;
+
+        [DllImport("user32.dll")]
+        private static extern uint MapVirtualKeyW(uint uCode, uint uMapType);
+
         private string GenerateWin32InputSequence(KeyEventArgs e, bool isKeyDown)
         {
             var vk = ConvertAvaloniaKeyToVirtualKey(e.Key);
@@ -2864,13 +2961,28 @@ namespace Iciclecreek.Terminal
                 return string.Empty;
             }
 
-            // Get scan code (we use 0 as we don't have direct access to hardware scan codes)
+            // Use the real scan code where the OS can provide one. ConPTY re-synthesizes
+            // INPUT_RECORDs from these sequences and some client-side translations
+            // (notably Alt+key combinations) misbehave when the scan code is 0.
             var scanCode = 0;
+            if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+                scanCode = (int)MapVirtualKeyW((uint)vk, MAPVK_VK_TO_VSC);
 
             // Get unicode character - first try KeySymbol, then fall back to key mapping
             // Note: Special keys (arrows, Enter, etc.) have unicodeChar=0 which is correct
+            //
+            // With plain Alt held (not AltGr = Ctrl+Alt), Avalonia's KeySymbol is the key
+            // LABEL ("V"), not the typed character ("v") — trusting it sends Alt+uppercase
+            // and TUI apps' alt+<letter> shortcuts (e.g. Alt+V image paste in Claude Code)
+            // never match. Use the Shift-aware key mapping instead. AltGr keeps KeySymbol
+            // so national characters (ą, ę, …) still work.
+            bool plainAlt = e.KeyModifiers.HasFlag(KeyModifiers.Alt) && !e.KeyModifiers.HasFlag(KeyModifiers.Control);
             int unicodeChar = 0;
-            if (!string.IsNullOrEmpty(e.KeySymbol) && e.KeySymbol.Length >= 1)
+            if (plainAlt && TryMapKeyToChar(e.Key, e.KeyModifiers, out var altChar))
+            {
+                unicodeChar = altChar;
+            }
+            else if (!string.IsNullOrEmpty(e.KeySymbol) && e.KeySymbol.Length >= 1)
             {
                 unicodeChar = char.ConvertToUtf32(e.KeySymbol, 0);
             }
