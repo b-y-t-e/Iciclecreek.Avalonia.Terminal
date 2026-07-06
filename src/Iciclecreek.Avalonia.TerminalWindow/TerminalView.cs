@@ -665,7 +665,17 @@ namespace Iciclecreek.Terminal
             if (clipboard == null)
                 return false;
 
+            // Clipboard content set by remote-desktop/clipboard-sync tools (RustDesk,
+            // RDP) is often delay-rendered or briefly locked right after a copy — the
+            // first read can come back empty even though text is available. Retry
+            // before concluding the clipboard holds no text.
             var text = await clipboard.TryGetTextAsync();
+            for (int attempt = 0; string.IsNullOrEmpty(text) && attempt < 2; attempt++)
+            {
+                await Task.Delay(75);
+                text = await clipboard.TryGetTextAsync();
+            }
+
             if (!string.IsNullOrEmpty(text))
             {
                 // Wrap paste in bracketed paste sequences if mode is enabled
@@ -674,11 +684,28 @@ namespace Iciclecreek.Terminal
                     text = $"\u001b[200~{text}\u001b[201~";
                 }
 
-                await SendToPtyAsync(text, resumeAutoScroll: true);
+                await SendToPtyAsync(EncodeTextForPtyInput(text), resumeAutoScroll: true);
                 return true;
             }
 
             return false;
+        }
+
+        // In win32-input-mode ConPTY expects keyboard input as INPUT_RECORD sequences;
+        // raw text written to the input pipe is silently dropped for VT clients
+        // (node-based TUIs like Claude Code receive nothing). Encode each character as
+        // a synthesized key-down record (vk=0, sc=0 — the convention Windows Terminal
+        // uses for pasted text). Outside win32 mode the text passes through unchanged.
+        private string EncodeTextForPtyInput(string text)
+        {
+            if (!_terminal.Win32InputMode)
+                return text;
+
+            var esc = (char)27;
+            var sb = new StringBuilder(text.Length * 12);
+            foreach (var ch in text)
+                sb.Append($"{esc}[0;0;{(int)ch};1;0;1_");
+            return sb.ToString();
         }
 
         /// <summary>
@@ -689,7 +716,7 @@ namespace Iciclecreek.Terminal
         /// <summary>
         /// Sends text to the PTY as if typed by the user.
         /// </summary>
-        public Task SendTextAsync(string text) => SendToPtyAsync(text, resumeAutoScroll: true);
+        public Task SendTextAsync(string text) => SendToPtyAsync(EncodeTextForPtyInput(text), resumeAutoScroll: true);
 
         /// <summary>
         /// Copies selected text to the clipboard.
@@ -1434,7 +1461,10 @@ namespace Iciclecreek.Terminal
                     else
                     {
                         _terminal.Selection.EndSelection();
-                        if (CopyOnSelect && _terminal.Selection.HasSelection)
+                        // Whitespace-only selections are almost always accidental
+                        // (focus click) — copying them would clobber the clipboard.
+                        if (CopyOnSelect && _terminal.Selection.HasSelection &&
+                            !string.IsNullOrWhiteSpace(_terminal.Selection.GetSelectionText()))
                             await CopyAsync();
                     }
                     _isSelecting = false;
@@ -1481,7 +1511,17 @@ namespace Iciclecreek.Terminal
                     int viewportRow = row;
                     if (_pendingSelectionStart.HasValue)
                     {
-                        // First movement after a single click — now actually start the selection.
+                        // Start the deferred single-click selection only once the pointer
+                        // reaches a DIFFERENT cell. Sub-cell jitter during an ordinary
+                        // focus click must not create a one-cell selection — combined
+                        // with CopyOnSelect it silently overwrites the clipboard with
+                        // a single space or border character.
+                        if ((col, row) == _pendingSelectionStart.Value)
+                        {
+                            e.Handled = true;
+                            return;
+                        }
+
                         _terminal.Selection.StartSelection(_pendingSelectionStart.Value.Col, _pendingSelectionStart.Value.Row, XT.Selection.SelectionMode.Normal);
                         _pendingSelectionStart = null;
                     }
