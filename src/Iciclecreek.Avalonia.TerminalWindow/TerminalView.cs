@@ -1574,8 +1574,32 @@ namespace Iciclecreek.Terminal
             // Delta.Y is positive when scrolling up (towards user), negative when scrolling down
             var delta = e.Delta.Y;
 
-            if (_ptyConnection != null && _terminal.MouseTrackingMode != XT.Input.MouseTrackingMode.None)
+            // While a drag-selection is in progress (selection-first mode), the wheel
+            // scrolls the LOCAL scrollback instead of being forwarded to the app.
+            // This lets the user select at the bottom, wheel up through history and
+            // copy the whole (partially off-screen) range — forwarding the wheel would
+            // let the app repaint the content underneath a buffer-anchored selection.
+            // Scroll the local scrollback during a drag-selection so the selection can
+            // extend over history — but only when there IS scrollback. On alt-screen
+            // TUIs (claude, vim) the terminal holds a single screen, so the wheel goes
+            // to the app instead and the doomed selection is cancelled below.
+            bool scrollLocallyForSelection = _isSelecting && SelectionOverridesMouseTracking && MaxScrollback > 0;
+
+            if (!scrollLocallyForSelection &&
+                _ptyConnection != null && _terminal.MouseTrackingMode != XT.Input.MouseTrackingMode.None)
             {
+                // The app is about to scroll/repaint its own content (alt-screen TUIs).
+                // A buffer-anchored selection would visually "slide" over the new
+                // content — cancel it (including an in-progress drag) instead of
+                // pretending it still matches.
+                if (SelectionOverridesMouseTracking && (_terminal.Selection.HasSelection || _isSelecting))
+                {
+                    _terminal.Selection.ClearSelection();
+                    _pendingSelectionStart = null;
+                    _isSelecting = false;
+                    this.RequestInvalidate();
+                }
+
                 var point = e.GetPosition(this);
                 var col = (int)(point.X / _charWidth);
                 var row = (int)(point.Y / _charHeight);
@@ -1595,6 +1619,15 @@ namespace Iciclecreek.Terminal
 
             if (delta != 0)
             {
+                // A deferred single-click selection stores its start in viewport
+                // coordinates — anchor it in the buffer BEFORE the viewport moves,
+                // otherwise the start would drift to whatever scrolls under it.
+                if (_isSelecting && _pendingSelectionStart.HasValue)
+                {
+                    _terminal.Selection.StartSelection(_pendingSelectionStart.Value.Col, _pendingSelectionStart.Value.Row, XT.Selection.SelectionMode.Normal);
+                    _pendingSelectionStart = null;
+                }
+
                 // Scroll up (negative delta to ViewportY) when wheel scrolls up (positive delta)
                 // Scroll down (positive delta to ViewportY) when wheel scrolls down (negative delta)
                 int linesToScroll = (int)(-delta * scrollLines);
@@ -1608,6 +1641,17 @@ namespace Iciclecreek.Terminal
                 if (newViewportY != ViewportY)
                 {
                     ViewportY = newViewportY;
+                }
+
+                // Extend the in-progress selection to the row now under the pointer —
+                // without this the selection end lags until the next mouse move.
+                if (_isSelecting && _terminal.Selection.HasSelection)
+                {
+                    var point = e.GetPosition(this);
+                    var col = (int)(point.X / _charWidth);
+                    var row = (int)(point.Y / _charHeight);
+                    _terminal.Selection.UpdateSelection(col, row);
+                    this.RequestInvalidate();
                 }
 
                 e.Handled = true;
