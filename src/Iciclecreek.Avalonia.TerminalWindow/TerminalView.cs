@@ -2518,6 +2518,12 @@ namespace Iciclecreek.Terminal
                         lines[i] = _terminal.Buffer.GetLine(viewportY + i);
                 }
 
+                // Two-pass rendering: paint all row backgrounds first, then all text.
+                // Otherwise the background of row N+1 overpaints glyph descenders
+                // (j, y, g) that extend below row N's line box in some fonts.
+                var lineAttrs = new LineAttribute[lines.Length];
+                var lineRuns = new List<CachedTextRun>?[lines.Length];
+
                 for (int screenY = 0; screenY < lines.Length; screenY++)
                 {
                     var line = lines[screenY];
@@ -2529,15 +2535,50 @@ namespace Iciclecreek.Terminal
                     var rowHeight = Math.Max(0, endYPos - startYPos);
 
                     var lineAttr = line.LineAttribute;
+                    lineAttrs[screenY] = lineAttr;
                     if (lineAttr == LineAttribute.DoubleWidth ||
                              lineAttr == LineAttribute.DoubleHeightTop ||
                              lineAttr == LineAttribute.DoubleHeightBottom)
                     {
-                        RenderDoubleWidthLine(context, line, screenY, startYPos, rowHeight, lineAttr, scale);
+                        RenderDoubleWidthLine(context, line, screenY, startYPos, rowHeight, lineAttr, scale, backgroundPass: true);
                     }
                     else
                     {
-                        RenderNormalLine(context, line, screenY, startYPos, rowHeight, scale);
+                        var runs = GetOrBuildLineRuns(line);
+                        lineRuns[screenY] = runs;
+                        foreach (var run in runs)
+                        {
+                            var startX = Snap(run.StartX * _charWidth, scale);
+                            var endX = Snap((run.StartX + run.CellCount) * _charWidth, scale);
+                            context.FillRectangle(run.Background, new Rect(startX, startYPos, Math.Max(0, endX - startX), rowHeight));
+                        }
+                    }
+                }
+
+                for (int screenY = 0; screenY < lines.Length; screenY++)
+                {
+                    var line = lines[screenY];
+                    if (line == null)
+                        continue;
+
+                    var startYPos = Snap(screenY * _charHeight, scale);
+                    var endYPos = Snap((screenY + 1) * _charHeight, scale);
+                    var rowHeight = Math.Max(0, endYPos - startYPos);
+
+                    var lineAttr = lineAttrs[screenY];
+                    if (lineAttr == LineAttribute.DoubleWidth ||
+                             lineAttr == LineAttribute.DoubleHeightTop ||
+                             lineAttr == LineAttribute.DoubleHeightBottom)
+                    {
+                        RenderDoubleWidthLine(context, line, screenY, startYPos, rowHeight, lineAttr, scale, backgroundPass: false);
+                    }
+                    else if (lineRuns[screenY] is { } runs)
+                    {
+                        foreach (var run in runs)
+                        {
+                            var startX = Snap(run.StartX * _charWidth, scale);
+                            context.DrawText(run.Text, new Point(startX, startYPos));
+                        }
                     }
                 }
 
@@ -2559,27 +2600,16 @@ namespace Iciclecreek.Terminal
         }
 
         /// <summary>
-        /// Renders a normal (single-width, single-height) line.
+        /// Returns the text runs for a normal (single-width, single-height) line,
+        /// building and caching them if needed. Does not draw anything — the caller
+        /// paints backgrounds and text in separate passes.
         /// </summary>
-        private void RenderNormalLine(DrawingContext context, BufferLine line, int screenY, double startYPos, double rowHeight, double scale)
+        private List<CachedTextRun> GetOrBuildLineRuns(BufferLine line)
         {
-            // Try to use cached text runs for this line (but not when ReverseVideo mode is active as it affects all cells)
+            // Reuse cached text runs (but not when ReverseVideo mode is active as it affects all cells)
             var textRuns = !_terminal.ReverseVideo ? line.Cache as List<CachedTextRun> : null;
             if (textRuns != null)
-            {
-                foreach (var run in textRuns)
-                {
-                    // Recalculate position based on current screen row
-                    var startX = Snap(run.StartX * _charWidth, scale);
-                    var endX = Snap((run.StartX + run.CellCount) * _charWidth, scale);
-                    var rect = new Rect(startX, startYPos, Math.Max(0, endX - startX), rowHeight);
-                    var position = new Point(startX, startYPos);
-
-                    context.FillRectangle(run.Background, rect);
-                    context.DrawText(run.Text, position);
-                }
-                return;
-            }
+                return textRuns;
 
             // Build and cache text runs for this line
             textRuns = new List<CachedTextRun>();
@@ -2629,9 +2659,6 @@ namespace Iciclecreek.Terminal
                     x += cell.Width;  // Move past wide character and its placeholder
                 }
 
-                var startX = Snap(runStartX * _charWidth, scale);
-                var endX = Snap((runStartX + cellCount) * _charWidth, scale);
-                var rect = new Rect(startX, startYPos, Math.Max(0, endX - startX), rowHeight);
                 var background = cell.GetBackgroundBrush(this.Background);
                 var foreground = cell.GetForegroundBrush(this.Foreground);
                 // Apply cell-level inverse attribute
@@ -2649,17 +2676,15 @@ namespace Iciclecreek.Terminal
                 if (td != null)
                     formattedText.SetTextDecorations(td);
 
-                var position = new Point(startX, startYPos);
                 // Cache only content-dependent data, not screen position
                 textRuns.Add(new CachedTextRun(formattedText, runStartX, cellCount, background));
-
-                context.FillRectangle(background, rect);
-                context.DrawText(formattedText, position);
             }
 
             // Cache the text runs (but not when ReverseVideo mode is active)
             if (!_terminal.ReverseVideo)
                 line.Cache = textRuns;
+
+            return textRuns;
         }
 
         private void RenderHoveredUrl(DrawingContext context, int viewportY, double scale)
@@ -2680,14 +2705,23 @@ namespace Iciclecreek.Terminal
 
         /// <summary>
         /// Renders a double-width or double-height line using transforms and clipping.
+        /// Called twice per frame: once with backgroundPass=true (fills cell backgrounds)
+        /// and once with backgroundPass=false (draws text), so text descenders are never
+        /// overpainted by the backgrounds of the following rows.
         /// </summary>
-        private void RenderDoubleWidthLine(DrawingContext context, BufferLine line, int screenY, double startYPos, double rowHeight, LineAttribute lineAttr, double scale)
+        private void RenderDoubleWidthLine(DrawingContext context, BufferLine line, int screenY, double startYPos, double rowHeight, LineAttribute lineAttr, double scale, bool backgroundPass)
         {
             // Don't cache double-width lines (transform makes caching complex)
-            line.Cache = null;
+            if (backgroundPass)
+                line.Cache = null;
 
-            // Calculate the clip rect for this row
-            var clipRect = new Rect(0, startYPos, _terminal.Cols * _charWidth, rowHeight);
+            // Calculate the clip rect for this row. Double-height lines must be clipped
+            // vertically to expose only the top/bottom half of the 2x-scaled text.
+            // For double-width (single-height) text, clip horizontally only, so glyph
+            // descenders can extend below the row just like on normal lines.
+            var clipRect = backgroundPass || lineAttr.IsDoubleHeight()
+                ? new Rect(0, startYPos, _terminal.Cols * _charWidth, rowHeight)
+                : new Rect(0, 0, _terminal.Cols * _charWidth, Bounds.Height);
 
             // For double-height lines, we need to clip to show only top or bottom half
             double scaleX = 2.0;
@@ -2758,7 +2792,6 @@ namespace Iciclecreek.Terminal
 
                         var startX = Snap(runStartX * _charWidth, scale);
                         var endX = Snap((runStartX + cellCount) * _charWidth, scale);
-                        var rect = new Rect(startX, startYPos, Math.Max(0, endX - startX), rowHeight);
                         var background = cell.GetBackgroundBrush(this.Background);
                         var foreground = cell.GetForegroundBrush(this.Foreground);
                         // Apply cell-level inverse attribute
@@ -2770,16 +2803,21 @@ namespace Iciclecreek.Terminal
                         if (cell.Attributes.IsBlink() && this._cursorBlinkOn)
                             (foreground, background) = (background, foreground);
 
-                        var typeface = new Typeface(FontFamily, cell.GetFontStyle(), cell.GetFontWeight());
-                        var formattedText = new FormattedText(text, CultureInfo.CurrentCulture, FlowDirection.LeftToRight, typeface, FontSize, foreground);
-                        var td = cell.GetTextDecorations();
-                        if (td != null)
-                            formattedText.SetTextDecorations(td);
+                        if (backgroundPass)
+                        {
+                            var rect = new Rect(startX, startYPos, Math.Max(0, endX - startX), rowHeight);
+                            context.FillRectangle(background, rect);
+                        }
+                        else
+                        {
+                            var typeface = new Typeface(FontFamily, cell.GetFontStyle(), cell.GetFontWeight());
+                            var formattedText = new FormattedText(text, CultureInfo.CurrentCulture, FlowDirection.LeftToRight, typeface, FontSize, foreground);
+                            var td = cell.GetTextDecorations();
+                            if (td != null)
+                                formattedText.SetTextDecorations(td);
 
-                        var position = new Point(startX, startYPos);
-
-                        context.FillRectangle(background, rect);
-                        context.DrawText(formattedText, position);
+                            context.DrawText(formattedText, new Point(startX, startYPos));
+                        }
                     }
                 }
             }
