@@ -2549,98 +2549,107 @@ namespace Iciclecreek.Terminal
 
             try
             {
-                int viewportY;
-                BufferLine?[] lines;
+                // Hold the terminal lock for the whole frame. Building runs stores
+                // line.Cache, which must not race with the PTY thread's cache
+                // invalidation on cell writes — a lost invalidation leaves stale text
+                // on screen (typed characters invisible, cursor detached from text).
+                // It also guarantees the cursor/selection are drawn from the same
+                // buffer state as the text.
                 lock (_terminalLock)
                 {
-                    viewportY = _terminal.Buffer.ViewportY;
-                    int viewportLines = _terminal.Rows;
-                    int endLine = Math.Min(_terminal.Buffer.Length, viewportY + viewportLines);
-                    int lineCount = endLine - viewportY;
-                    lines = new BufferLine?[lineCount];
-                    for (int i = 0; i < lineCount; i++)
-                        lines[i] = _terminal.Buffer.GetLine(viewportY + i);
+                    RenderFrame(context, scale);
                 }
-
-                // Two-pass rendering: paint all row backgrounds first, then all text.
-                // Otherwise the background of row N+1 overpaints glyph descenders
-                // (j, y, g) that extend below row N's line box in some fonts.
-                var lineAttrs = new LineAttribute[lines.Length];
-                var lineRuns = new List<CachedTextRun>?[lines.Length];
-
-                for (int screenY = 0; screenY < lines.Length; screenY++)
-                {
-                    var line = lines[screenY];
-                    if (line == null)
-                        continue;
-
-                    var startYPos = Snap(screenY * _charHeight, scale);
-                    var endYPos = Snap((screenY + 1) * _charHeight, scale);
-                    var rowHeight = Math.Max(0, endYPos - startYPos);
-
-                    var lineAttr = line.LineAttribute;
-                    lineAttrs[screenY] = lineAttr;
-                    if (lineAttr == LineAttribute.DoubleWidth ||
-                             lineAttr == LineAttribute.DoubleHeightTop ||
-                             lineAttr == LineAttribute.DoubleHeightBottom)
-                    {
-                        RenderDoubleWidthLine(context, line, screenY, startYPos, rowHeight, lineAttr, scale, backgroundPass: true);
-                    }
-                    else
-                    {
-                        var runs = GetOrBuildLineRuns(line);
-                        lineRuns[screenY] = runs;
-                        foreach (var run in runs)
-                        {
-                            var startX = Snap(run.StartX * _charWidth, scale);
-                            var endX = Snap((run.StartX + run.CellCount) * _charWidth, scale);
-                            context.FillRectangle(run.Background, new Rect(startX, startYPos, Math.Max(0, endX - startX), rowHeight));
-                        }
-                    }
-                }
-
-                for (int screenY = 0; screenY < lines.Length; screenY++)
-                {
-                    var line = lines[screenY];
-                    if (line == null)
-                        continue;
-
-                    var startYPos = Snap(screenY * _charHeight, scale);
-                    var endYPos = Snap((screenY + 1) * _charHeight, scale);
-                    var rowHeight = Math.Max(0, endYPos - startYPos);
-
-                    var lineAttr = lineAttrs[screenY];
-                    if (lineAttr == LineAttribute.DoubleWidth ||
-                             lineAttr == LineAttribute.DoubleHeightTop ||
-                             lineAttr == LineAttribute.DoubleHeightBottom)
-                    {
-                        RenderDoubleWidthLine(context, line, screenY, startYPos, rowHeight, lineAttr, scale, backgroundPass: false);
-                    }
-                    else if (lineRuns[screenY] is { } runs)
-                    {
-                        foreach (var run in runs)
-                        {
-                            var startX = Snap(run.StartX * _charWidth, scale);
-                            context.DrawText(run.Text, new Point(startX, startYPos));
-                        }
-                    }
-                }
-
-                // Render URL underline when hovering
-                RenderHoveredUrl(context, viewportY, scale);
-
-                // Render selection overlay
-                RenderSelection(context, viewportY, scale);
-
-                RenderCursor(context, viewportY, scale);
-
-                // Render IME preedit (composition) text overlay
-                RenderPreeditText(context, viewportY, scale);
             }
             catch (Exception ex)
             {
                 Debug.WriteLine($"[TerminalView] Render error: {ex.Message}");
             }
+        }
+
+        private void RenderFrame(DrawingContext context, double scale)
+        {
+            int viewportY = _terminal.Buffer.ViewportY;
+            int viewportLines = _terminal.Rows;
+            int endLine = Math.Min(_terminal.Buffer.Length, viewportY + viewportLines);
+            int lineCount = endLine - viewportY;
+            var lines = new BufferLine?[lineCount];
+            for (int i = 0; i < lineCount; i++)
+                lines[i] = _terminal.Buffer.GetLine(viewportY + i);
+
+            // Two-pass rendering: paint all row backgrounds first, then all text.
+            // Otherwise the background of row N+1 overpaints glyph descenders
+            // (j, y, g) that extend below row N's line box in some fonts.
+            var lineAttrs = new LineAttribute[lines.Length];
+            var lineRuns = new List<CachedTextRun>?[lines.Length];
+
+            for (int screenY = 0; screenY < lines.Length; screenY++)
+            {
+                var line = lines[screenY];
+                if (line == null)
+                    continue;
+
+                var startYPos = Snap(screenY * _charHeight, scale);
+                var endYPos = Snap((screenY + 1) * _charHeight, scale);
+                var rowHeight = Math.Max(0, endYPos - startYPos);
+
+                var lineAttr = line.LineAttribute;
+                lineAttrs[screenY] = lineAttr;
+                if (lineAttr == LineAttribute.DoubleWidth ||
+                         lineAttr == LineAttribute.DoubleHeightTop ||
+                         lineAttr == LineAttribute.DoubleHeightBottom)
+                {
+                    RenderDoubleWidthLine(context, line, screenY, startYPos, rowHeight, lineAttr, scale, backgroundPass: true);
+                }
+                else
+                {
+                    var runs = GetOrBuildLineRuns(line);
+                    lineRuns[screenY] = runs;
+                    foreach (var run in runs)
+                    {
+                        var startX = Snap(run.StartX * _charWidth, scale);
+                        var endX = Snap((run.StartX + run.CellCount) * _charWidth, scale);
+                        context.FillRectangle(run.Background, new Rect(startX, startYPos, Math.Max(0, endX - startX), rowHeight));
+                    }
+                }
+            }
+
+            for (int screenY = 0; screenY < lines.Length; screenY++)
+            {
+                var line = lines[screenY];
+                if (line == null)
+                    continue;
+
+                var startYPos = Snap(screenY * _charHeight, scale);
+                var endYPos = Snap((screenY + 1) * _charHeight, scale);
+                var rowHeight = Math.Max(0, endYPos - startYPos);
+
+                var lineAttr = lineAttrs[screenY];
+                if (lineAttr == LineAttribute.DoubleWidth ||
+                         lineAttr == LineAttribute.DoubleHeightTop ||
+                         lineAttr == LineAttribute.DoubleHeightBottom)
+                {
+                    RenderDoubleWidthLine(context, line, screenY, startYPos, rowHeight, lineAttr, scale, backgroundPass: false);
+                }
+                else if (lineRuns[screenY] is { } runs)
+                {
+                    foreach (var run in runs)
+                    {
+                        var startX = Snap(run.StartX * _charWidth, scale);
+                        context.DrawText(run.Text, new Point(startX, startYPos));
+                    }
+                }
+            }
+
+            // Render URL underline when hovering
+            RenderHoveredUrl(context, viewportY, scale);
+
+            // Render selection overlay
+            RenderSelection(context, viewportY, scale);
+
+            RenderCursor(context, viewportY, scale);
+
+            // Render IME preedit (composition) text overlay
+            RenderPreeditText(context, viewportY, scale);
         }
 
         /// <summary>
@@ -2761,11 +2770,12 @@ namespace Iciclecreek.Terminal
 
             // Calculate the clip rect for this row. Double-height lines must be clipped
             // vertically to expose only the top/bottom half of the 2x-scaled text.
-            // For double-width (single-height) text, clip horizontally only, so glyph
-            // descenders can extend below the row just like on normal lines.
+            // For double-width (single-height) text, allow half a row of extra descent
+            // below the row for glyph descenders, but no more — otherwise text could
+            // smear across distant rows.
             var clipRect = backgroundPass || lineAttr.IsDoubleHeight()
                 ? new Rect(0, startYPos, _terminal.Cols * _charWidth, rowHeight)
-                : new Rect(0, 0, _terminal.Cols * _charWidth, Bounds.Height);
+                : new Rect(0, startYPos, _terminal.Cols * _charWidth, rowHeight + _charHeight * 0.5);
 
             // For double-height lines, we need to clip to show only top or bottom half
             double scaleX = 2.0;
